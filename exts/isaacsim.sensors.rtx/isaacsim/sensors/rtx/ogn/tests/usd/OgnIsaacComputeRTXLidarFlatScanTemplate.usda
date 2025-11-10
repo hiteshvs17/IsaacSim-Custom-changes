@@ -1,0 +1,73 @@
+#usda 1.0
+(
+    doc ="""Generated from node description file OgnIsaacComputeRTXLidarFlatScan.ogn
+Contains templates for node types found in that file."""
+)
+
+def OmniGraph "TestGraph"
+{
+    token evaluator:type = "push"
+    int2 fileFormatVersion = (1, 3)
+    token flatCacheBacking = "Shared"
+    token pipelineStage = "pipelineStageSimulation"
+
+    def OmniGraphNode "Template_isaacsim_sensors_rtx_IsaacComputeRTXLidarFlatScan" (
+        docs="""Accumulates full scan from the lowest elevation emitter on an RTX Lidar"""
+    )
+    {
+        token node:type = "isaacsim.sensors.rtx.IsaacComputeRTXLidarFlatScan"
+        int node:typeVersion = 2
+
+        # 5 attributes
+        custom uint64 inputs:bufferSize = 0 (
+            docs="""Size (in bytes) of the buffer (0 if the input is a texture)"""
+        )
+        custom uint64 inputs:dataPtr = 0 (
+            docs="""Pointer to LiDAR render result."""
+        )
+        custom uint inputs:exec (
+            docs="""The input execution port"""
+        )
+        custom token inputs:renderProductPath = "" (
+            docs="""Used to retrieve lidar configuration."""
+        )
+        custom double inputs:timeStamp = 0.0 (
+            docs="""Input timestamp (s)"""
+        )
+
+        # 11 attributes
+        custom float2 outputs:azimuthRange = (0.0, 0.0) (
+            docs="""The azimuth range [min, max] (deg)."""
+        )
+        custom float2 outputs:depthRange = (0, 0) (
+            docs="""Range for sensor to detect a hit [min, max] (m)"""
+        )
+        custom uint outputs:exec (
+            docs="""Output execution triggers when lidar sensor has accumulated a full scan."""
+        )
+        custom float outputs:horizontalFov = 0 (
+            docs="""Horizontal Field of View (deg)"""
+        )
+        custom float outputs:horizontalResolution = 0 (
+            docs="""Increment between horizontal rays (deg)"""
+        )
+        custom uchar[] outputs:intensitiesData = [] (
+            docs="""Intensity measurements from full scan, ordered by increasing azimuth"""
+        )
+        custom float[] outputs:linearDepthData = [] (
+            docs="""Linear depth measurements from full scan, ordered by increasing azimuth (m)"""
+        )
+        custom int outputs:numCols = 0 (
+            docs="""Number of columns in buffers"""
+        )
+        custom int outputs:numRows = 0 (
+            docs="""Number of rows in buffers"""
+        )
+        custom float outputs:rotationRate = 0 (
+            docs="""Rotation rate of sensor in Hz"""
+        )
+        custom double outputs:timeStamp = 0.0 (
+            docs="""Timestamp of first beam in scan"""
+        )
+    }
+}
