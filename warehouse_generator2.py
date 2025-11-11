@@ -1,0 +1,954 @@
+#!/usr/bin/env python3
+"""
+Warehouse Rack Layout Designer for Ubuntu
+A specialized GUI tool for designing warehouse rack layouts with precise dimensions
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import json
+import math
+from PIL import Image, ImageDraw
+
+class Rack:
+    """Represents a single rack with position and dimensions"""
+    def __init__(self, x, y, width_m, depth_m, rotation=0, rack_type="Standard Pallet"):
+        self.x = x  # Canvas coordinates
+        self.y = y
+        self.width_m = width_m  # Real-world meters
+        self.depth_m = depth_m
+        self.rotation = rotation
+        self.rack_type = rack_type
+        self.canvas_id = None
+        
+    def to_dict(self, origin_x_m, origin_y_m, scale):
+        """Convert to dict with world coordinates relative to origin"""
+        # Convert canvas pixels to meters
+        x_m = self.x / scale
+        y_m = self.y / scale
+        
+        # Transform to world coordinates (origin-relative)
+        world_x = x_m - origin_x_m
+        world_y = y_m - origin_y_m
+        
+        # Swap x and y for the JSON output
+        return {
+            'type': self.rack_type,
+            'x': round(world_y, 3),  # Canvas Y becomes world X
+            'y': round(world_x, 3),  # Canvas X becomes world Y
+            'width_m': self.width_m,
+            'depth_m': self.depth_m,
+            'rotation': self.rotation
+        }
+    
+    @staticmethod
+    def from_dict(data, origin_x_m, origin_y_m, scale):
+        """Create rack from dict with world coordinates"""
+        # Swap back: JSON x is canvas y, JSON y is canvas x
+        world_x = data['y']  # JSON Y becomes canvas X
+        world_y = data['x']  # JSON X becomes canvas Y
+        
+        # Convert from world coordinates to canvas coordinates
+        x_m = world_x + origin_x_m
+        y_m = world_y + origin_y_m
+        
+        x_px = x_m * scale
+        y_px = y_m * scale
+        
+        return Rack(x_px, y_px, data['width_m'], 
+                   data['depth_m'], data.get('rotation', 0),
+                   data.get('type', 'Standard Pallet'))
+
+
+class WarehouseDesigner:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Warehouse Rack Layout Designer")
+        self.root.geometry("1400x900")
+        
+        # Scale: pixels per meter
+        self.scale = 50  # 50 pixels = 1 meter
+        
+        # Warehouse presets (width, height in meters)
+        self.warehouse_presets = {
+            "Small": (30, 20),
+            "Big": (54, 32),
+            "Factory": (60, 34),
+            "Custom": (40, 30)
+        }
+        
+        # Default warehouse dimensions
+        self.warehouse_width_m = 30
+        self.warehouse_height_m = 20
+        
+        # World origin (in meters from top-left corner)
+        self.origin_x_m = 15  # Default to center
+        self.origin_y_m = 10
+        
+        # Racks storage
+        self.racks = []
+        self.selected_rack = None
+        self.selected_rack_idx = None
+        
+        # Human path storage
+        self.path_points = []
+        self.path_lines = []
+        
+        # Drawing state
+        self.mode = "single"  # single, row, grid, select, path
+        self.drag_start = None
+        self.temp_line = None
+        
+        # Preset rack dimensions (in meters)
+        self.rack_presets = {
+            "Standard Pallet": (1.2, 0.8),
+            "Drive-in": (3.0, 1.5),
+            "Cantilever": (2.0, 1.0),
+            "Small": (0.8, 0.6),
+            "Custom": (1.0, 1.0)
+        }
+        
+        self.setup_ui()
+        self.update_warehouse_size()
+        
+    def setup_ui(self):
+        """Create the GUI layout"""
+        # Top toolbar
+        toolbar = ttk.Frame(self.root, relief=tk.RAISED, borderwidth=2)
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(toolbar, text="Scale:").pack(side=tk.LEFT, padx=5)
+        self.scale_var = tk.StringVar(value="50")
+        scale_spin = ttk.Spinbox(toolbar, from_=10, to=200, width=8,
+                                textvariable=self.scale_var, 
+                                command=self.update_scale)
+        scale_spin.pack(side=tk.LEFT, padx=5)
+        ttk.Label(toolbar, text="px/m").pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, 
+                                                        fill=tk.Y, padx=10)
+        
+        ttk.Button(toolbar, text="Save Layout", 
+                  command=self.save_layout).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Load Layout", 
+                  command=self.load_layout).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Export PNG", 
+                  command=self.export_png).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Export Path", 
+                  command=self.export_path).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Clear All", 
+                  command=self.clear_all).pack(side=tk.LEFT, padx=5)
+        
+        # Main container
+        main_container = ttk.Frame(self.root)
+        main_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Left panel - Tools
+        left_panel = ttk.Frame(main_container, width=250)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        left_panel.pack_propagate(False)
+        
+        # Warehouse size selection
+        warehouse_frame = ttk.LabelFrame(left_panel, text="Warehouse Size", padding=10)
+        warehouse_frame.pack(fill=tk.X, pady=5)
+        
+        self.warehouse_var = tk.StringVar(value="Small")
+        for preset in self.warehouse_presets.keys():
+            ttk.Radiobutton(warehouse_frame, text=preset, value=preset,
+                          variable=self.warehouse_var,
+                          command=self.update_warehouse_preset).pack(anchor=tk.W, pady=2)
+        
+        # Custom warehouse dimensions
+        wh_dim_frame = ttk.Frame(warehouse_frame)
+        wh_dim_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(wh_dim_frame, text="Width (m):").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.wh_width_var = tk.StringVar(value="30")
+        ttk.Entry(wh_dim_frame, textvariable=self.wh_width_var, width=8).grid(
+            row=0, column=1, pady=2)
+        
+        ttk.Label(wh_dim_frame, text="Height (m):").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.wh_height_var = tk.StringVar(value="20")
+        ttk.Entry(wh_dim_frame, textvariable=self.wh_height_var, width=8).grid(
+            row=1, column=1, pady=2)
+        
+        ttk.Button(wh_dim_frame, text="Apply Size",
+                  command=self.apply_warehouse_size).grid(
+                      row=2, column=0, columnspan=2, pady=5)
+        
+        # World origin settings
+        origin_frame = ttk.LabelFrame(left_panel, text="World Origin (meters)", padding=10)
+        origin_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(origin_frame, text="Origin X:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.origin_x_var = tk.StringVar(value="15.0")
+        ttk.Entry(origin_frame, textvariable=self.origin_x_var, width=10).grid(
+            row=0, column=1, pady=2)
+        
+        ttk.Label(origin_frame, text="Origin Y:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.origin_y_var = tk.StringVar(value="10.0")
+        ttk.Entry(origin_frame, textvariable=self.origin_y_var, width=10).grid(
+            row=1, column=1, pady=2)
+        
+        ttk.Button(origin_frame, text="Update Origin",
+                  command=self.update_origin).grid(
+                      row=2, column=0, columnspan=2, pady=5)
+        ttk.Button(origin_frame, text="Set to Center",
+                  command=self.set_origin_center).grid(
+                      row=3, column=0, columnspan=2, pady=2)
+        
+        # Mode selection
+        mode_frame = ttk.LabelFrame(left_panel, text="Placement Mode", padding=10)
+        mode_frame.pack(fill=tk.X, pady=5)
+        
+        self.mode_var = tk.StringVar(value="single")
+        modes = [
+            ("Single Rack", "single"),
+            ("Row Generator", "row"),
+            ("Grid Generator", "grid"),
+            ("Select/Move", "select"),
+            ("Draw Human Path", "path")
+        ]
+        for text, mode in modes:
+            ttk.Radiobutton(mode_frame, text=text, value=mode,
+                          variable=self.mode_var,
+                          command=self.change_mode).pack(anchor=tk.W, pady=2)
+        
+        # Rack preset selection
+        preset_frame = ttk.LabelFrame(left_panel, text="Rack Type", padding=10)
+        preset_frame.pack(fill=tk.X, pady=5)
+        
+        self.preset_var = tk.StringVar(value="Standard Pallet")
+        for preset in self.rack_presets.keys():
+            ttk.Radiobutton(preset_frame, text=preset, value=preset,
+                          variable=self.preset_var,
+                          command=self.update_dimensions).pack(anchor=tk.W, pady=2)
+        
+        # Rack dimensions
+        dim_frame = ttk.LabelFrame(left_panel, text="Rack Dimensions (m)", padding=10)
+        dim_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(dim_frame, text="Width:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.width_var = tk.StringVar(value="1.2")
+        ttk.Entry(dim_frame, textvariable=self.width_var, width=10).grid(
+            row=0, column=1, pady=2)
+        
+        ttk.Label(dim_frame, text="Depth:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.depth_var = tk.StringVar(value="0.8")
+        ttk.Entry(dim_frame, textvariable=self.depth_var, width=10).grid(
+            row=1, column=1, pady=2)
+        
+        ttk.Label(dim_frame, text="Rotation:").grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.rotation_var = tk.StringVar(value="0")
+        ttk.Entry(dim_frame, textvariable=self.rotation_var, width=10).grid(
+            row=2, column=1, pady=2)
+        
+        # Row/Grid parameters
+        gen_frame = ttk.LabelFrame(left_panel, text="Row/Grid Parameters", padding=10)
+        gen_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(gen_frame, text="Count:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.count_var = tk.StringVar(value="5")
+        ttk.Entry(gen_frame, textvariable=self.count_var, width=10).grid(
+            row=0, column=1, pady=2)
+        
+        ttk.Label(gen_frame, text="Spacing (m):").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.spacing_var = tk.StringVar(value="2.5")
+        ttk.Entry(gen_frame, textvariable=self.spacing_var, width=10).grid(
+            row=1, column=1, pady=2)
+        
+        ttk.Label(gen_frame, text="Rows:").grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.rows_var = tk.StringVar(value="3")
+        ttk.Entry(gen_frame, textvariable=self.rows_var, width=10).grid(
+            row=2, column=1, pady=2)
+        
+        ttk.Label(gen_frame, text="Row Spacing (m):").grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.row_spacing_var = tk.StringVar(value="4.0")
+        ttk.Entry(gen_frame, textvariable=self.row_spacing_var, width=10).grid(
+            row=3, column=1, pady=2)
+        
+        # Action buttons
+        action_frame = ttk.LabelFrame(left_panel, text="Actions", padding=10)
+        action_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(action_frame, text="Delete Selected",
+                  command=self.delete_selected).pack(fill=tk.X, pady=2)
+        ttk.Button(action_frame, text="Duplicate Selected",
+                  command=self.duplicate_selected).pack(fill=tk.X, pady=2)
+        ttk.Button(action_frame, text="Clear Path",
+                  command=self.clear_path).pack(fill=tk.X, pady=2)
+        ttk.Button(action_frame, text="Undo Last Point",
+                  command=self.undo_last_point).pack(fill=tk.X, pady=2)
+        
+        # Statistics
+        stats_frame = ttk.LabelFrame(left_panel, text="Statistics", padding=10)
+        stats_frame.pack(fill=tk.X, pady=5)
+        
+        self.stats_label = ttk.Label(stats_frame, text="Total Racks: 0\nArea: 30m x 20m\nPath Points: 0")
+        self.stats_label.pack(anchor=tk.W)
+        
+        # Canvas frame with scrollbars
+        canvas_frame = ttk.Frame(main_container)
+        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Canvas
+        self.canvas = tk.Canvas(canvas_frame, bg='white')
+        
+        # Scrollbars
+        v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, 
+                                command=self.canvas.yview)
+        h_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL,
+                                command=self.canvas.xview)
+        
+        self.canvas.configure(yscrollcommand=v_scroll.set, 
+                            xscrollcommand=h_scroll.set)
+        
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Bind events
+        self.canvas.bind('<Button-1>', self.canvas_click)
+        self.canvas.bind('<B1-Motion>', self.canvas_drag)
+        self.canvas.bind('<ButtonRelease-1>', self.canvas_release)
+        self.canvas.bind('<Delete>', lambda e: self.delete_selected())
+        
+        # Status bar
+        self.status_bar = ttk.Label(self.root, text="Ready", 
+                                   relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def update_warehouse_preset(self):
+        """Update warehouse dimensions based on preset"""
+        preset = self.warehouse_var.get()
+        width, height = self.warehouse_presets[preset]
+        self.wh_width_var.set(str(width))
+        self.wh_height_var.set(str(height))
+        if preset != "Custom":
+            self.apply_warehouse_size()
+    
+    def apply_warehouse_size(self):
+        """Apply custom warehouse size"""
+        try:
+            width = float(self.wh_width_var.get())
+            height = float(self.wh_height_var.get())
+            
+            if width <= 0 or height <= 0:
+                raise ValueError("Dimensions must be positive")
+            
+            self.warehouse_width_m = width
+            self.warehouse_height_m = height
+            self.update_warehouse_size()
+            
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid warehouse dimensions: {e}")
+            self.wh_width_var.set(str(self.warehouse_width_m))
+            self.wh_height_var.set(str(self.warehouse_height_m))
+    
+    def update_warehouse_size(self):
+        """Update canvas size and redraw"""
+        canvas_width = int(self.warehouse_width_m * self.scale)
+        canvas_height = int(self.warehouse_height_m * self.scale)
+        
+        self.canvas.config(scrollregion=(0, 0, canvas_width, canvas_height))
+        self.draw_warehouse_boundary()
+        self.draw_grid()
+        self.draw_origin()
+        self.redraw_all_racks()
+        self.update_stats()
+    
+    def draw_warehouse_boundary(self):
+        """Draw warehouse boundary rectangle"""
+        self.canvas.delete('boundary')
+        width_px = self.warehouse_width_m * self.scale
+        height_px = self.warehouse_height_m * self.scale
+        
+        # Draw thick border
+        self.canvas.create_rectangle(0, 0, width_px, height_px,
+                                     outline='black', width=3, tags='boundary')
+        self.canvas.tag_lower('boundary')
+    
+    def draw_grid(self):
+        """Draw background grid"""
+        self.canvas.delete('grid')
+        
+        # Draw meter grid lines
+        for i in range(0, int(self.warehouse_width_m) + 1):
+            x = i * self.scale
+            self.canvas.create_line(x, 0, x, self.warehouse_height_m * self.scale,
+                                  fill='lightgray', tags='grid')
+            if i % 5 == 0:  # Label every 5 meters
+                self.canvas.create_text(x, 10, text=f'{i}m', 
+                                      fill='gray', tags='grid')
+        
+        for i in range(0, int(self.warehouse_height_m) + 1):
+            y = i * self.scale
+            self.canvas.create_line(0, y, self.warehouse_width_m * self.scale, y,
+                                  fill='lightgray', tags='grid')
+            if i % 5 == 0:
+                self.canvas.create_text(10, y, text=f'{i}m',
+                                      fill='gray', tags='grid')
+        
+        self.canvas.tag_lower('grid')
+    
+    def draw_origin(self):
+        """Draw world origin marker"""
+        self.canvas.delete('origin')
+        
+        ox = self.origin_x_m * self.scale
+        oy = self.origin_y_m * self.scale
+        
+        size = 20
+        # Draw crosshair
+        self.canvas.create_line(ox - size, oy, ox + size, oy,
+                               fill='blue', width=2, tags='origin')
+        self.canvas.create_line(ox, oy - size, ox, oy + size,
+                               fill='blue', width=2, tags='origin')
+        self.canvas.create_oval(ox - 5, oy - 5, ox + 5, oy + 5,
+                               fill='blue', outline='darkblue', tags='origin')
+        self.canvas.create_text(ox + 25, oy - 15, text='Origin (0,0)',
+                               fill='blue', font=('Arial', 10, 'bold'), tags='origin')
+    
+    def draw_path(self):
+        """Draw the human path"""
+        # Clear existing path lines
+        for line_id in self.path_lines:
+            self.canvas.delete(line_id)
+        self.path_lines.clear()
+        
+        # Draw lines between consecutive points
+        for i in range(len(self.path_points) - 1):
+            x1, y1 = self.path_points[i]
+            x2, y2 = self.path_points[i + 1]
+            line_id = self.canvas.create_line(x1, y1, x2, y2,
+                                             fill='green', width=3,
+                                             arrow=tk.LAST, tags='path')
+            self.path_lines.append(line_id)
+        
+        # Draw points
+        for x, y in self.path_points:
+            point_id = self.canvas.create_oval(x-4, y-4, x+4, y+4,
+                                              fill='green', outline='darkgreen',
+                                              tags='path')
+            self.path_lines.append(point_id)
+    
+    def update_origin(self):
+        """Update world origin from entry fields"""
+        try:
+            self.origin_x_m = float(self.origin_x_var.get())
+            self.origin_y_m = float(self.origin_y_var.get())
+            self.draw_origin()
+            messagebox.showinfo("Success", "Origin updated")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid origin coordinates")
+            self.origin_x_var.set(str(self.origin_x_m))
+            self.origin_y_var.set(str(self.origin_y_m))
+    
+    def set_origin_center(self):
+        """Set origin to warehouse center"""
+        self.origin_x_m = self.warehouse_width_m / 2
+        self.origin_y_m = self.warehouse_height_m / 2
+        self.origin_x_var.set(f"{self.origin_x_m:.1f}")
+        self.origin_y_var.set(f"{self.origin_y_m:.1f}")
+        self.draw_origin()
+    
+    def update_scale(self):
+        """Update the scale and redraw everything"""
+        try:
+            new_scale = float(self.scale_var.get())
+            if new_scale < 10 or new_scale > 200:
+                raise ValueError()
+            
+            # Calculate scale factor
+            scale_factor = new_scale / self.scale
+            self.scale = new_scale
+            
+            # Scale all rack positions
+            for rack in self.racks:
+                rack.x *= scale_factor
+                rack.y *= scale_factor
+            
+            self.update_warehouse_size()
+            
+        except ValueError:
+            messagebox.showerror("Error", "Invalid scale value")
+            self.scale_var.set(str(self.scale))
+    
+    def update_dimensions(self):
+        """Update dimensions based on preset"""
+        preset = self.preset_var.get()
+        width, depth = self.rack_presets[preset]
+        self.width_var.set(str(width))
+        self.depth_var.set(str(depth))
+    
+    def change_mode(self):
+        """Change placement mode"""
+        self.mode = self.mode_var.get()
+        self.selected_rack = None
+        self.selected_rack_idx = None
+        self.redraw_all_racks()
+        self.status_bar.config(text=f"Mode: {self.mode}")
+    
+    def canvas_click(self, event):
+        """Handle canvas click"""
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        
+        # Check if click is within warehouse bounds
+        if x < 0 or x > self.warehouse_width_m * self.scale or \
+           y < 0 or y > self.warehouse_height_m * self.scale:
+            return
+        
+        if self.mode == "single":
+            self.place_rack(x, y)
+        elif self.mode == "row":
+            self.drag_start = (x, y)
+            self.temp_line = self.canvas.create_line(x, y, x, y, 
+                                                     fill='blue', dash=(5, 5))
+        elif self.mode == "grid":
+            self.place_grid(x, y)
+        elif self.mode == "select":
+            self.select_rack(x, y)
+            if self.selected_rack:
+                self.drag_start = (x, y)
+        elif self.mode == "path":
+            self.add_path_point(x, y)
+    
+    def canvas_drag(self, event):
+        """Handle canvas drag"""
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        
+        if self.mode == "row" and self.drag_start and self.temp_line:
+            x1, y1 = self.drag_start
+            self.canvas.coords(self.temp_line, x1, y1, x, y)
+        elif self.mode == "select" and self.selected_rack and self.drag_start:
+            dx = x - self.drag_start[0]
+            dy = y - self.drag_start[1]
+            
+            # Keep within bounds
+            new_x = self.selected_rack.x + dx
+            new_y = self.selected_rack.y + dy
+            
+            if 0 <= new_x <= self.warehouse_width_m * self.scale and \
+               0 <= new_y <= self.warehouse_height_m * self.scale:
+                self.selected_rack.x = new_x
+                self.selected_rack.y = new_y
+                self.drag_start = (x, y)
+                self.draw_rack(self.selected_rack, selected=True)
+    
+    def canvas_release(self, event):
+        """Handle canvas release"""
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        
+        if self.mode == "row" and self.drag_start:
+            x1, y1 = self.drag_start
+            self.place_row(x1, y1, x, y)
+            if self.temp_line:
+                self.canvas.delete(self.temp_line)
+                self.temp_line = None
+            self.drag_start = None
+        elif self.mode == "select":
+            self.drag_start = None
+    
+    def place_rack(self, x, y):
+        """Place a single rack"""
+        try:
+            width = float(self.width_var.get())
+            depth = float(self.depth_var.get())
+            rotation = float(self.rotation_var.get())
+            rack_type = self.preset_var.get()
+            
+            rack = Rack(x, y, width, depth, rotation, rack_type)
+            self.racks.append(rack)
+            self.draw_rack(rack)
+            self.update_stats()
+            
+        except ValueError:
+            messagebox.showerror("Error", "Invalid dimensions")
+    
+    def place_row(self, x1, y1, x2, y2):
+        """Place a row of racks"""
+        try:
+            width = float(self.width_var.get())
+            depth = float(self.depth_var.get())
+            count = int(self.count_var.get())
+            spacing = float(self.spacing_var.get())
+            rotation = float(self.rotation_var.get())
+            rack_type = self.preset_var.get()
+            
+            # Calculate direction and spacing
+            dx = x2 - x1
+            dy = y2 - y1
+            length = math.sqrt(dx**2 + dy**2)
+            
+            if length < 1:
+                return
+            
+            # Unit vector
+            ux = dx / length
+            uy = dy / length
+            
+            # Place racks along the line
+            spacing_px = spacing * self.scale
+            for i in range(count):
+                rx = x1 + ux * spacing_px * i
+                ry = y1 + uy * spacing_px * i
+                
+                # Check bounds
+                if 0 <= rx <= self.warehouse_width_m * self.scale and \
+                   0 <= ry <= self.warehouse_height_m * self.scale:
+                    rack = Rack(rx, ry, width, depth, rotation, rack_type)
+                    self.racks.append(rack)
+                    self.draw_rack(rack)
+            
+            self.update_stats()
+            
+        except ValueError:
+            messagebox.showerror("Error", "Invalid parameters")
+    
+    def place_grid(self, x, y):
+        """Place a grid of racks"""
+        try:
+            width = float(self.width_var.get())
+            depth = float(self.depth_var.get())
+            count = int(self.count_var.get())
+            rows = int(self.rows_var.get())
+            spacing = float(self.spacing_var.get())
+            row_spacing = float(self.row_spacing_var.get())
+            rotation = float(self.rotation_var.get())
+            rack_type = self.preset_var.get()
+            
+            spacing_px = spacing * self.scale
+            row_spacing_px = row_spacing * self.scale
+            
+            for row in range(rows):
+                for col in range(count):
+                    rx = x + col * spacing_px
+                    ry = y + row * row_spacing_px
+                    
+                    # Check bounds
+                    if 0 <= rx <= self.warehouse_width_m * self.scale and \
+                       0 <= ry <= self.warehouse_height_m * self.scale:
+                        rack = Rack(rx, ry, width, depth, rotation, rack_type)
+                        self.racks.append(rack)
+                        self.draw_rack(rack)
+            
+            self.update_stats()
+            
+        except ValueError:
+            messagebox.showerror("Error", "Invalid parameters")
+    
+    def draw_rack(self, rack, selected=False):
+        """Draw a rack on canvas"""
+        if rack.canvas_id:
+            self.canvas.delete(rack.canvas_id)
+        
+        # Calculate rack corners based on rotation
+        w_px = rack.width_m * self.scale
+        h_px = rack.depth_m * self.scale
+        
+        angle_rad = math.radians(rack.rotation)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        
+        # Corner points (rotated)
+        corners = [
+            (-w_px/2, -h_px/2),
+            (w_px/2, -h_px/2),
+            (w_px/2, h_px/2),
+            (-w_px/2, h_px/2)
+        ]
+        
+        rotated = []
+        for cx, cy in corners:
+            rx = cx * cos_a - cy * sin_a + rack.x
+            ry = cx * sin_a + cy * cos_a + rack.y
+            rotated.extend([rx, ry])
+        
+        color = 'red' if selected else 'gray'
+        rack.canvas_id = self.canvas.create_polygon(rotated, fill=color, 
+                                                    outline='darkgray', width=2)
+    
+    def redraw_all_racks(self):
+        """Redraw all racks"""
+        for idx, rack in enumerate(self.racks):
+            selected = (idx == self.selected_rack_idx)
+            self.draw_rack(rack, selected)
+    
+    def select_rack(self, x, y):
+        """Select a rack at position"""
+        self.selected_rack = None
+        self.selected_rack_idx = None
+        
+        for idx, rack in enumerate(self.racks):
+            # Simple distance check
+            dist = math.sqrt((rack.x - x)**2 + (rack.y - y)**2)
+            if dist < self.scale:  # Within 1 meter
+                self.selected_rack = rack
+                self.selected_rack_idx = idx
+                
+                # Update dimension fields
+                self.width_var.set(str(rack.width_m))
+                self.depth_var.set(str(rack.depth_m))
+                self.rotation_var.set(str(rack.rotation))
+                break
+        
+        self.redraw_all_racks()
+    
+    def delete_selected(self):
+        """Delete selected rack"""
+        if self.selected_rack and self.selected_rack_idx is not None:
+            self.canvas.delete(self.selected_rack.canvas_id)
+            self.racks.pop(self.selected_rack_idx)
+            self.selected_rack = None
+            self.selected_rack_idx = None
+            self.update_stats()
+    
+    def duplicate_selected(self):
+        """Duplicate selected rack"""
+        if self.selected_rack:
+            new_rack = Rack(self.selected_rack.x + 20, 
+                          self.selected_rack.y + 20,
+                          self.selected_rack.width_m,
+                          self.selected_rack.depth_m,
+                          self.selected_rack.rotation,
+                          self.selected_rack.rack_type)
+            self.racks.append(new_rack)
+            self.draw_rack(new_rack)
+            self.update_stats()
+    
+    def update_stats(self):
+        """Update statistics display"""
+        stats_text = f"Total Racks: {len(self.racks)}\n"
+        stats_text += f"Area: {self.warehouse_width_m}m x {self.warehouse_height_m}m\n"
+        stats_text += f"Path Points: {len(self.path_points)}"
+        self.stats_label.config(text=stats_text)
+    
+    def add_path_point(self, x, y):
+        """Add a point to the human path"""
+        self.path_points.append((x, y))
+        self.draw_path()
+        self.update_stats()
+        self.status_bar.config(text=f"Path point {len(self.path_points)} added")
+    
+    def clear_path(self):
+        """Clear the entire path"""
+        if self.path_points and messagebox.askyesno("Confirm", "Clear entire path?"):
+            self.path_points.clear()
+            for line_id in self.path_lines:
+                self.canvas.delete(line_id)
+            self.path_lines.clear()
+            self.update_stats()
+            self.status_bar.config(text="Path cleared")
+    
+    def undo_last_point(self):
+        """Remove the last point from the path"""
+        if self.path_points:
+            self.path_points.pop()
+            self.draw_path()
+            self.update_stats()
+            self.status_bar.config(text=f"Last point removed. {len(self.path_points)} points remaining")
+    
+    def clear_all(self):
+        """Clear all racks"""
+        if messagebox.askyesno("Confirm", "Delete all racks and paths?"):
+            self.canvas.delete('all')
+            self.racks.clear()
+            self.selected_rack = None
+            self.selected_rack_idx = None
+            self.path_points.clear()
+            self.path_lines.clear()
+            self.update_warehouse_size()
+            self.update_stats()
+    
+    def save_layout(self):
+        """Save layout to JSON file with world coordinates"""
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            data = {
+                'warehouse_type': self.warehouse_var.get(),
+                'scale': self.scale,
+                'warehouse_width_m': self.warehouse_width_m,
+                'warehouse_height_m': self.warehouse_height_m,
+                'world_origin': {
+                    'x': self.origin_x_m,
+                    'y': self.origin_y_m
+                },
+                'racks': [rack.to_dict(self.origin_x_m, self.origin_y_m, self.scale) 
+                         for rack in self.racks]
+            }
+            
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            messagebox.showinfo("Success", f"Layout saved to {filename}\n"
+                              f"Warehouse Type: {self.warehouse_var.get()}\n"
+                              f"Positions are relative to origin at ({self.origin_x_m}, {self.origin_y_m})")
+    
+    def load_layout(self):
+        """Load layout from JSON file"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    data = json.load(f)
+                
+                # Clear existing
+                self.canvas.delete('all')
+                self.racks.clear()
+                
+                # Load settings
+                self.scale = data.get('scale', 50)
+                self.scale_var.set(str(self.scale))
+                
+                self.warehouse_width_m = data.get('warehouse_width_m', 40)
+                self.warehouse_height_m = data.get('warehouse_height_m', 30)
+                self.wh_width_var.set(str(self.warehouse_width_m))
+                self.wh_height_var.set(str(self.warehouse_height_m))
+                
+                # Load warehouse type
+                warehouse_type = data.get('warehouse_type', 'Custom')
+                self.warehouse_var.set(warehouse_type)
+                
+                # Load origin
+                origin = data.get('world_origin', {'x': self.warehouse_width_m/2, 
+                                                   'y': self.warehouse_height_m/2})
+                self.origin_x_m = origin['x']
+                self.origin_y_m = origin['y']
+                self.origin_x_var.set(str(self.origin_x_m))
+                self.origin_y_var.set(str(self.origin_y_m))
+                
+                # Load racks
+                for rack_data in data['racks']:
+                    rack = Rack.from_dict(rack_data, self.origin_x_m, 
+                                         self.origin_y_m, self.scale)
+                    self.racks.append(rack)
+                
+                self.update_warehouse_size()
+                messagebox.showinfo("Success", "Layout loaded")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load layout: {e}")
+    
+    def export_png(self):
+        """Export canvas as PNG image"""
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                # Get canvas dimensions
+                width = int(self.warehouse_width_m * self.scale)
+                height = int(self.warehouse_height_m * self.scale)
+                
+                # Create image
+                image = Image.new('RGB', (width, height), 'white')
+                draw = ImageDraw.Draw(image)
+                
+                # Draw grid
+                for i in range(0, int(self.warehouse_width_m) + 1):
+                    x = i * self.scale
+                    draw.line([(x, 0), (x, height)], fill='lightgray', width=1)
+                
+                for i in range(0, int(self.warehouse_height_m) + 1):
+                    y = i * self.scale
+                    draw.line([(0, y), (width, y)], fill='lightgray', width=1)
+                
+                # Draw boundary
+                draw.rectangle([0, 0, width-1, height-1], outline='black', width=3)
+                
+                # Draw origin
+                ox = int(self.origin_x_m * self.scale)
+                oy = int(self.origin_y_m * self.scale)
+                size = 20
+                draw.line([(ox - size, oy), (ox + size, oy)], fill='blue', width=2)
+                draw.line([(ox, oy - size), (ox, oy + size)], fill='blue', width=2)
+                draw.ellipse([ox-5, oy-5, ox+5, oy+5], fill='blue', outline='darkblue')
+                
+                # Draw racks
+                for rack in self.racks:
+                    w_px = rack.width_m * self.scale
+                    h_px = rack.depth_m * self.scale
+                    
+                    angle_rad = math.radians(rack.rotation)
+                    cos_a = math.cos(angle_rad)
+                    sin_a = math.sin(angle_rad)
+                    
+                    corners = [
+                        (-w_px/2, -h_px/2),
+                        (w_px/2, -h_px/2),
+                        (w_px/2, h_px/2),
+                        (-w_px/2, h_px/2)
+                    ]
+                    
+                    rotated = []
+                    for cx, cy in corners:
+                        rx = cx * cos_a - cy * sin_a + rack.x
+                        ry = cx * sin_a + cy * cos_a + rack.y
+                        rotated.append((rx, ry))
+                    
+                    draw.polygon(rotated, fill='gray', outline='darkgray')
+                
+                image.save(filename)
+                messagebox.showinfo("Success", f"Image exported to {filename}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export image: {e}")
+    
+    def export_path(self):
+        """Export human path to TXT file"""
+        if not self.path_points:
+            messagebox.showwarning("Warning", "No path points to export")
+            return
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    # Making the character idle at the start (Since we need to wait for bag to start)
+                    f.write("Character Idle 10")
+                    for x_px, y_px in self.path_points:
+                        # Convert canvas pixels to meters
+                        x_m = x_px / self.scale
+                        y_m = y_px / self.scale
+                        
+                        # Transform to world coordinates (origin-relative)
+                        world_x = x_m - self.origin_x_m
+                        world_y = y_m - self.origin_y_m
+                        
+                        # Swap x and y for output (same as JSON)
+                        # Canvas Y becomes world X, Canvas X becomes world Y
+                        output_x = world_y
+                        output_y = world_x
+                        
+                        # Write command
+                        f.write(f"Character GoTo {output_x:.3f} {output_y:.3f} 0.0 _\n")
+                
+                messagebox.showinfo("Success", 
+                                  f"Path exported to {filename}\n"
+                                  f"Total waypoints: {len(self.path_points)}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export path: {e}")
+
+
+def main():
+    root = tk.Tk()
+    app = WarehouseDesigner(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
