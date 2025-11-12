@@ -5,6 +5,22 @@ set -e
 CURR_DIR="."
 DOWNLOADS_DIR="${HOME}/Downloads"
 
+# --- Helper Function for YAML Update (Requires 'sed' utility) ---
+update_yaml_config() {
+    local usd_path="$1"
+    local motion_path="$2"
+    local yaml_file="$3"
+
+    echo "Updating YAML config file: $yaml_file"
+
+    sed -i "
+        /asset_path:/ c\asset_path: $usd_path
+        /command_file:/ c\command_file: $motion_path
+    " "$yaml_file"
+    echo "YAML update complete."
+}
+
+
 # Process 1: Start the warehouse gen app, user will save the files for path and json
 echo "Running warehouse_generator.py..."
 python3 warehouse_generator.py
@@ -69,9 +85,22 @@ NEW_USD_FILE_PATH=$(
 )
 
 # Process 4: Update this usd location, human motion text, in the isaac yaml file
-ISAAC_YAML_FILE_PATH="/"
+ISAAC_YAML_FILE_PATH="$DOWNLOADS_DIR/demo_motion.yaml"
+
+echo "--- Process 4: Updating YAML Configuration ---"
+
+if [ ! -f "$ISAAC_YAML_FILE_PATH" ]; then
+    echo "Error: YAML configuration file not found at $ISAAC_YAML_FILE_PATH. Cannot proceed."
+    exit 1
+fi
+
+update_yaml_config "$NEW_USD_FILE_PATH" "$HUMAN_MOTION_TXT_PATH" "$ISAAC_YAML_FILE_PATH"
+echo "Final configuration set in YAML:"
+echo "  USD Path: $NEW_USD_FILE_PATH"
+echo "  Motion Path: $HUMAN_MOTION_TXT_PATH"
+echo "-------------------------------------------"
+
 
 # Process 5: Launch isaac sim with the agent sdg default yaml path as the path above
-./launch-isaac-sim.sh -config /home/hitesh/Downloads/demo_motion.yaml
+./launch-isaac-sim.sh -config $ISAAC_YAML_FILE_PATH
 
-# Cleanup - Remove current motion txt file, json file in current folder. 
