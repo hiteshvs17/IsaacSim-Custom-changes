@@ -90,9 +90,10 @@ class WarehouseDesigner:
         self.selected_rack = None
         self.selected_rack_idx = None
         
-        # Human path storage
-        self.path_points = []
+        # Path waypoints storage
+        self.waypoints = []
         self.path_lines = []
+        self.waypoint_markers = []
         
         # Drawing state
         self.mode = "single"  # single, row, grid, select, path
@@ -104,7 +105,7 @@ class WarehouseDesigner:
             "Standard Pallet": (1.2, 0.8),
             "Drive-in": (3.0, 1.5),
             "Cantilever": (2.0, 1.0),
-            "Small": (0.8, 0.6),
+            "SmallRack": (2.0, 0.96),
             "Custom": (1.0, 1.0)
         }
         
@@ -134,8 +135,6 @@ class WarehouseDesigner:
                   command=self.load_layout).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Export PNG", 
                   command=self.export_png).pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar, text="Export Path", 
-                  command=self.export_path).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Clear All", 
                   command=self.clear_all).pack(side=tk.LEFT, padx=5)
         
@@ -207,7 +206,7 @@ class WarehouseDesigner:
             ("Row Generator", "row"),
             ("Grid Generator", "grid"),
             ("Select/Move", "select"),
-            ("Draw Human Path", "path")
+            ("Draw Path", "path")
         ]
         for text, mode in modes:
             ttk.Radiobutton(mode_frame, text=text, value=mode,
@@ -277,14 +276,12 @@ class WarehouseDesigner:
                   command=self.duplicate_selected).pack(fill=tk.X, pady=2)
         ttk.Button(action_frame, text="Clear Path",
                   command=self.clear_path).pack(fill=tk.X, pady=2)
-        ttk.Button(action_frame, text="Undo Last Point",
-                  command=self.undo_last_point).pack(fill=tk.X, pady=2)
         
         # Statistics
         stats_frame = ttk.LabelFrame(left_panel, text="Statistics", padding=10)
         stats_frame.pack(fill=tk.X, pady=5)
         
-        self.stats_label = ttk.Label(stats_frame, text="Total Racks: 0\nArea: 30m x 20m\nPath Points: 0")
+        self.stats_label = ttk.Label(stats_frame, text="Total Racks: 0\nArea: 30m x 20m\nWaypoints: 0")
         self.stats_label.pack(anchor=tk.W)
         
         # Canvas frame with scrollbars
@@ -355,6 +352,7 @@ class WarehouseDesigner:
         self.draw_grid()
         self.draw_origin()
         self.redraw_all_racks()
+        self.redraw_path()
         self.update_stats()
     
     def draw_warehouse_boundary(self):
@@ -409,29 +407,6 @@ class WarehouseDesigner:
         self.canvas.create_text(ox + 25, oy - 15, text='Origin (0,0)',
                                fill='blue', font=('Arial', 10, 'bold'), tags='origin')
     
-    def draw_path(self):
-        """Draw the human path"""
-        # Clear existing path lines
-        for line_id in self.path_lines:
-            self.canvas.delete(line_id)
-        self.path_lines.clear()
-        
-        # Draw lines between consecutive points
-        for i in range(len(self.path_points) - 1):
-            x1, y1 = self.path_points[i]
-            x2, y2 = self.path_points[i + 1]
-            line_id = self.canvas.create_line(x1, y1, x2, y2,
-                                             fill='green', width=3,
-                                             arrow=tk.LAST, tags='path')
-            self.path_lines.append(line_id)
-        
-        # Draw points
-        for x, y in self.path_points:
-            point_id = self.canvas.create_oval(x-4, y-4, x+4, y+4,
-                                              fill='green', outline='darkgreen',
-                                              tags='path')
-            self.path_lines.append(point_id)
-    
     def update_origin(self):
         """Update world origin from entry fields"""
         try:
@@ -468,6 +443,11 @@ class WarehouseDesigner:
                 rack.x *= scale_factor
                 rack.y *= scale_factor
             
+            # Scale waypoints
+            for i in range(len(self.waypoints)):
+                x, y = self.waypoints[i]
+                self.waypoints[i] = (x * scale_factor, y * scale_factor)
+            
             self.update_warehouse_size()
             
         except ValueError:
@@ -487,7 +467,11 @@ class WarehouseDesigner:
         self.selected_rack = None
         self.selected_rack_idx = None
         self.redraw_all_racks()
-        self.status_bar.config(text=f"Mode: {self.mode}")
+        
+        if self.mode == "path":
+            self.status_bar.config(text="Path Mode: Click to add waypoints")
+        else:
+            self.status_bar.config(text=f"Mode: {self.mode}")
     
     def canvas_click(self, event):
         """Handle canvas click"""
@@ -511,7 +495,7 @@ class WarehouseDesigner:
             if self.selected_rack:
                 self.drag_start = (x, y)
         elif self.mode == "path":
-            self.add_path_point(x, y)
+            self.add_waypoint(x, y)
     
     def canvas_drag(self, event):
         """Handle canvas drag"""
@@ -548,6 +532,56 @@ class WarehouseDesigner:
             self.drag_start = None
         elif self.mode == "select":
             self.drag_start = None
+    
+    def add_waypoint(self, x, y):
+        """Add a waypoint to the path"""
+        self.waypoints.append((x, y))
+        self.redraw_path()
+        self.update_stats()
+        self.status_bar.config(text=f"Path Mode: {len(self.waypoints)} waypoints")
+    
+    def clear_path(self):
+        """Clear all waypoints"""
+        if self.waypoints and messagebox.askyesno("Confirm", "Clear all waypoints?"):
+            self.waypoints.clear()
+            self.redraw_path()
+            self.update_stats()
+            self.status_bar.config(text="Path cleared")
+    
+    def redraw_path(self):
+        """Redraw the path with waypoints"""
+        # Clear existing path elements
+        for line_id in self.path_lines:
+            self.canvas.delete(line_id)
+        for marker_id in self.waypoint_markers:
+            self.canvas.delete(marker_id)
+        
+        self.path_lines.clear()
+        self.waypoint_markers.clear()
+        
+        if not self.waypoints:
+            return
+        
+        # Draw lines between waypoints
+        for i in range(len(self.waypoints) - 1):
+            x1, y1 = self.waypoints[i]
+            x2, y2 = self.waypoints[i + 1]
+            line_id = self.canvas.create_line(x1, y1, x2, y2, 
+                                             fill='green', width=3, 
+                                             arrow=tk.LAST, arrowshape=(10, 12, 5))
+            self.path_lines.append(line_id)
+        
+        # Draw waypoint markers
+        for idx, (x, y) in enumerate(self.waypoints):
+            # Circle marker
+            r = 8
+            circle_id = self.canvas.create_oval(x-r, y-r, x+r, y+r, 
+                                               fill='yellow', outline='green', width=2)
+            # Number label
+            text_id = self.canvas.create_text(x, y, text=str(idx+1), 
+                                             fill='black', font=('Arial', 10, 'bold'))
+            self.waypoint_markers.append(circle_id)
+            self.waypoint_markers.append(text_id)
     
     def place_rack(self, x, y):
         """Place a single rack"""
@@ -720,45 +754,59 @@ class WarehouseDesigner:
         """Update statistics display"""
         stats_text = f"Total Racks: {len(self.racks)}\n"
         stats_text += f"Area: {self.warehouse_width_m}m x {self.warehouse_height_m}m\n"
-        stats_text += f"Path Points: {len(self.path_points)}"
+        stats_text += f"Waypoints: {len(self.waypoints)}"
         self.stats_label.config(text=stats_text)
     
-    def add_path_point(self, x, y):
-        """Add a point to the human path"""
-        self.path_points.append((x, y))
-        self.draw_path()
-        self.update_stats()
-        self.status_bar.config(text=f"Path point {len(self.path_points)} added")
-    
-    def clear_path(self):
-        """Clear the entire path"""
-        if self.path_points and messagebox.askyesno("Confirm", "Clear entire path?"):
-            self.path_points.clear()
-            for line_id in self.path_lines:
-                self.canvas.delete(line_id)
-            self.path_lines.clear()
-            self.update_stats()
-            self.status_bar.config(text="Path cleared")
-    
-    def undo_last_point(self):
-        """Remove the last point from the path"""
-        if self.path_points:
-            self.path_points.pop()
-            self.draw_path()
-            self.update_stats()
-            self.status_bar.config(text=f"Last point removed. {len(self.path_points)} points remaining")
-    
     def clear_all(self):
-        """Clear all racks"""
-        if messagebox.askyesno("Confirm", "Delete all racks and paths?"):
+        """Clear all racks and path"""
+        if messagebox.askyesno("Confirm", "Delete all racks and path?"):
             self.canvas.delete('all')
             self.racks.clear()
+            self.waypoints.clear()
+            self.path_lines.clear()
+            self.waypoint_markers.clear()
             self.selected_rack = None
             self.selected_rack_idx = None
-            self.path_points.clear()
-            self.path_lines.clear()
             self.update_warehouse_size()
             self.update_stats()
+    
+    def waypoints_to_dict(self):
+        """Convert waypoints to world coordinates"""
+        waypoints_world = []
+        for x_px, y_px in self.waypoints:
+            # Convert to meters
+            x_m = x_px / self.scale
+            y_m = y_px / self.scale
+            
+            # Relative to origin
+            world_x = x_m - self.origin_x_m
+            world_y = y_m - self.origin_y_m
+            
+            # Swap x and y
+            waypoints_world.append({
+                'x': round(world_y, 3),
+                'y': round(world_x, 3)
+            })
+        
+        return waypoints_world
+    
+    def waypoints_from_dict(self, waypoints_data):
+        """Load waypoints from world coordinates"""
+        self.waypoints.clear()
+        
+        for wp in waypoints_data:
+            # Swap back
+            world_x = wp['y']
+            world_y = wp['x']
+            
+            # Convert to canvas
+            x_m = world_x + self.origin_x_m
+            y_m = world_y + self.origin_y_m
+            
+            x_px = x_m * self.scale
+            y_px = y_m * self.scale
+            
+            self.waypoints.append((x_px, y_px))
     
     def save_layout(self):
         """Save layout to JSON file with world coordinates"""
@@ -768,6 +816,7 @@ class WarehouseDesigner:
         )
         
         if filename:
+            # Save JSON data
             data = {
                 'warehouse_type': self.warehouse_var.get(),
                 'scale': self.scale,
@@ -778,15 +827,30 @@ class WarehouseDesigner:
                     'y': self.origin_y_m
                 },
                 'racks': [rack.to_dict(self.origin_x_m, self.origin_y_m, self.scale) 
-                         for rack in self.racks]
+                         for rack in self.racks],
+                'path': {
+                    'waypoints': self.waypoints_to_dict()
+                }
             }
             
             with open(filename, 'w') as f:
                 json.dump(data, f, indent=2)
             
-            messagebox.showinfo("Success", f"Layout saved to {filename}\n"
-                              f"Warehouse Type: {self.warehouse_var.get()}\n"
-                              f"Positions are relative to origin at ({self.origin_x_m}, {self.origin_y_m})")
+            # Automatically save PNG with same name
+            png_filename = filename.rsplit('.', 1)[0] + '.png'
+            try:
+                self.export_png_to_file(png_filename)
+                messagebox.showinfo("Success", 
+                                  f"Layout saved to:\n{filename}\n"
+                                  f"Image saved to:\n{png_filename}\n\n"
+                                  f"Warehouse Type: {self.warehouse_var.get()}\n"
+                                  f"Racks: {len(self.racks)}\n"
+                                  f"Waypoints: {len(self.waypoints)}\n"
+                                  f"Positions are relative to origin at ({self.origin_x_m}, {self.origin_y_m})")
+            except Exception as e:
+                messagebox.showwarning("Partial Success", 
+                                     f"JSON saved successfully to {filename}\n"
+                                     f"But failed to save PNG: {e}")
     
     def load_layout(self):
         """Load layout from JSON file"""
@@ -802,6 +866,9 @@ class WarehouseDesigner:
                 # Clear existing
                 self.canvas.delete('all')
                 self.racks.clear()
+                self.waypoints.clear()
+                self.path_lines.clear()
+                self.waypoint_markers.clear()
                 
                 # Load settings
                 self.scale = data.get('scale', 50)
@@ -830,8 +897,14 @@ class WarehouseDesigner:
                                          self.origin_y_m, self.scale)
                     self.racks.append(rack)
                 
+                # Load path
+                if 'path' in data and 'waypoints' in data['path']:
+                    self.waypoints_from_dict(data['path']['waypoints'])
+                
                 self.update_warehouse_size()
-                messagebox.showinfo("Success", "Layout loaded")
+                messagebox.showinfo("Success", f"Layout loaded\n"
+                                  f"Racks: {len(self.racks)}\n"
+                                  f"Waypoints: {len(self.waypoints)}")
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load layout: {e}")
@@ -845,103 +918,81 @@ class WarehouseDesigner:
         
         if filename:
             try:
-                # Get canvas dimensions
-                width = int(self.warehouse_width_m * self.scale)
-                height = int(self.warehouse_height_m * self.scale)
-                
-                # Create image
-                image = Image.new('RGB', (width, height), 'white')
-                draw = ImageDraw.Draw(image)
-                
-                # Draw grid
-                for i in range(0, int(self.warehouse_width_m) + 1):
-                    x = i * self.scale
-                    draw.line([(x, 0), (x, height)], fill='lightgray', width=1)
-                
-                for i in range(0, int(self.warehouse_height_m) + 1):
-                    y = i * self.scale
-                    draw.line([(0, y), (width, y)], fill='lightgray', width=1)
-                
-                # Draw boundary
-                draw.rectangle([0, 0, width-1, height-1], outline='black', width=3)
-                
-                # Draw origin
-                ox = int(self.origin_x_m * self.scale)
-                oy = int(self.origin_y_m * self.scale)
-                size = 20
-                draw.line([(ox - size, oy), (ox + size, oy)], fill='blue', width=2)
-                draw.line([(ox, oy - size), (ox, oy + size)], fill='blue', width=2)
-                draw.ellipse([ox-5, oy-5, ox+5, oy+5], fill='blue', outline='darkblue')
-                
-                # Draw racks
-                for rack in self.racks:
-                    w_px = rack.width_m * self.scale
-                    h_px = rack.depth_m * self.scale
-                    
-                    angle_rad = math.radians(rack.rotation)
-                    cos_a = math.cos(angle_rad)
-                    sin_a = math.sin(angle_rad)
-                    
-                    corners = [
-                        (-w_px/2, -h_px/2),
-                        (w_px/2, -h_px/2),
-                        (w_px/2, h_px/2),
-                        (-w_px/2, h_px/2)
-                    ]
-                    
-                    rotated = []
-                    for cx, cy in corners:
-                        rx = cx * cos_a - cy * sin_a + rack.x
-                        ry = cx * sin_a + cy * cos_a + rack.y
-                        rotated.append((rx, ry))
-                    
-                    draw.polygon(rotated, fill='gray', outline='darkgray')
-                
-                image.save(filename)
+                self.export_png_to_file(filename)
                 messagebox.showinfo("Success", f"Image exported to {filename}")
-                
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export image: {e}")
     
-    def export_path(self):
-        """Export human path to TXT file"""
-        if not self.path_points:
-            messagebox.showwarning("Warning", "No path points to export")
-            return
+    def export_png_to_file(self, filename):
+        """Export canvas as PNG image to specified filename"""
+        # Get canvas dimensions
+        width = int(self.warehouse_width_m * self.scale)
+        height = int(self.warehouse_height_m * self.scale)
         
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-        )
+        # Create image
+        image = Image.new('RGB', (width, height), 'white')
+        draw = ImageDraw.Draw(image)
         
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    # Making the character idle at the start (Since we need to wait for bag to start)
-                    f.write("Character Idle 10")
-                    for x_px, y_px in self.path_points:
-                        # Convert canvas pixels to meters
-                        x_m = x_px / self.scale
-                        y_m = y_px / self.scale
-                        
-                        # Transform to world coordinates (origin-relative)
-                        world_x = x_m - self.origin_x_m
-                        world_y = y_m - self.origin_y_m
-                        
-                        # Swap x and y for output (same as JSON)
-                        # Canvas Y becomes world X, Canvas X becomes world Y
-                        output_x = world_y
-                        output_y = world_x
-                        
-                        # Write command
-                        f.write(f"Character GoTo {output_x:.3f} {output_y:.3f} 0.0 _\n")
-                
-                messagebox.showinfo("Success", 
-                                  f"Path exported to {filename}\n"
-                                  f"Total waypoints: {len(self.path_points)}")
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to export path: {e}")
+        # Draw grid
+        for i in range(0, int(self.warehouse_width_m) + 1):
+            x = i * self.scale
+            draw.line([(x, 0), (x, height)], fill='lightgray', width=1)
+        
+        for i in range(0, int(self.warehouse_height_m) + 1):
+            y = i * self.scale
+            draw.line([(0, y), (width, y)], fill='lightgray', width=1)
+        
+        # Draw boundary
+        draw.rectangle([0, 0, width-1, height-1], outline='black', width=3)
+        
+        # Draw origin
+        ox = int(self.origin_x_m * self.scale)
+        oy = int(self.origin_y_m * self.scale)
+        size = 20
+        draw.line([(ox - size, oy), (ox + size, oy)], fill='blue', width=2)
+        draw.line([(ox, oy - size), (ox, oy + size)], fill='blue', width=2)
+        draw.ellipse([ox-5, oy-5, ox+5, oy+5], fill='blue', outline='darkblue')
+        
+        # Draw racks
+        for rack in self.racks:
+            w_px = rack.width_m * self.scale
+            h_px = rack.depth_m * self.scale
+            
+            angle_rad = math.radians(rack.rotation)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            
+            corners = [
+                (-w_px/2, -h_px/2),
+                (w_px/2, -h_px/2),
+                (w_px/2, h_px/2),
+                (-w_px/2, h_px/2)
+            ]
+            
+            rotated = []
+            for cx, cy in corners:
+                rx = cx * cos_a - cy * sin_a + rack.x
+                ry = cx * sin_a + cy * cos_a + rack.y
+                rotated.append((rx, ry))
+            
+            draw.polygon(rotated, fill='gray', outline='darkgray')
+        
+        # Draw path
+        if len(self.waypoints) > 1:
+            # Draw lines between waypoints
+            for i in range(len(self.waypoints) - 1):
+                x1, y1 = self.waypoints[i]
+                x2, y2 = self.waypoints[i + 1]
+                draw.line([(x1, y1), (x2, y2)], fill='green', width=3)
+        
+        # Draw waypoint markers
+        for idx, (x, y) in enumerate(self.waypoints):
+            r = 8
+            draw.ellipse([x-r, y-r, x+r, y+r], fill='yellow', outline='green', width=2)
+            # Draw number (simplified, as PIL text requires font setup)
+            draw.text((x-3, y-6), str(idx+1), fill='black')
+        
+        image.save(filename)
 
 
 def main():

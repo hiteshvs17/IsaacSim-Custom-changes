@@ -33,9 +33,15 @@ rack_asset_file = config["rack_asset_file"].get("narrow_standard", "")
 if not rack_asset_file or rack_asset_file == "default path":
     raise ValueError(f"No valid rack asset file path found")
 
+# Get human and robot scene path from YAML
+human_and_robot_path = config.get("human_and_robot_path", "")
+if not human_and_robot_path:
+    raise ValueError("No human_and_robot_path found in YAML config")
+
 print(f"[RACK PLACER] Warehouse type: {warehouse_type}")
 print(f"[RACK PLACER] Warehouse USD: {warehouse_usd_file}")
 print(f"[RACK PLACER] Rack asset: {rack_asset_file}")
+print(f"[RACK PLACER] Human and Robot scene: {human_and_robot_path}")
 
 # Launch Isaac Sim in headless mode (or with GUI)
 simulation_app = SimulationApp({
@@ -106,11 +112,32 @@ for i, rack in enumerate(racks):
             print(f"[RACK PLACER] ✓ Placed Rack_{i:03d} at ({x_m:.2f}, {y_m:.2f})")
         else:
             print(f"[RACK PLACER] ✗ Failed to get prim for Rack_{i:03d}")
-            
+    
     except Exception as e:
         print(f"[RACK PLACER] ✗ Error with Rack_{i:03d}: {e}")
 
 print(f"[RACK PLACER] Complete! Placed {successful}/{len(racks)} racks.")
+
+# Import human and robot scene
+print(f"[RACK PLACER] Importing human and robot scene...")
+human_robot_parent_path = f"{environment_prim_path}/HumanAndRobot"
+
+try:
+    # Create a reference to the human and robot scene
+    omni.kit.commands.execute('CreateReference',
+        usd_context=omni.usd.get_context(),
+        path_to=human_robot_parent_path,
+        asset_path=human_and_robot_path,
+        instanceable=True
+    )
+    
+    simulation_app.update()
+    time.sleep(0.5)
+    
+    print(f"[RACK PLACER] ✓ Successfully imported human and robot scene")
+    
+except Exception as e:
+    print(f"[RACK PLACER] ✗ Failed to import human and robot scene: {e}")
 
 # Keep the simulation running (remove these lines if you want it to exit immediately)
 print("[RACK PLACER] Simulation running. Close window to exit.")
