@@ -51,7 +51,7 @@ simulation_app = SimulationApp({
 })
 
 import isaacsim.core.utils.prims as prim_utils
-from pxr import Gf, UsdGeom
+from pxr import Gf, UsdGeom, UsdPhysics, Usd, Sdf
 import omni.usd
 import carb
 import time
@@ -118,26 +118,49 @@ for i, rack in enumerate(racks):
 
 print(f"[RACK PLACER] Complete! Placed {successful}/{len(racks)} racks.")
 
-# Import human and robot scene
+# Import human and robot scene directly under World
 print(f"[RACK PLACER] Importing human and robot scene...")
-human_robot_parent_path = f"{environment_prim_path}/HumanAndRobot"
 
 try:
-    # Create a reference to the human and robot scene
-    omni.kit.commands.execute('CreateReference',
-        usd_context=omni.usd.get_context(),
-        path_to=human_robot_parent_path,
-        asset_path=human_and_robot_path,
-        instanceable=True
-    )
+    # Get the current stage
+    stage = omni.usd.get_context().get_stage()
     
-    simulation_app.update()
-    time.sleep(0.5)
+    # Load the human and robot USD as a sublayer or reference it directly under World
+    # We'll use AddReference to bring the content directly under World
     
-    print(f"[RACK PLACER] ✓ Successfully imported human and robot scene")
+    # Open the human_and_robot USD to see its structure
+    human_robot_layer = Sdf.Layer.FindOrOpen(human_and_robot_path)
+    
+    if human_robot_layer:
+        # Add as sublayer to bring all prims directly into the current stage
+        root_layer = stage.GetRootLayer()
+        root_layer.subLayerPaths.append(human_and_robot_path)
+        
+        simulation_app.update()
+        time.sleep(0.5)
+        
+        print(f"[RACK PLACER] ✓ Successfully imported human and robot scene as sublayer")
+        print(f"[RACK PLACER]   Prims from the scene are now directly under /World")
+    else:
+        print(f"[RACK PLACER] ⚠ Could not load human_and_robot layer, trying reference method...")
+        
+        # Alternative: Reference the entire file's default prim under World
+        world_prim = stage.GetPrimAtPath(environment_prim_path)
+        if world_prim:
+            references = world_prim.GetReferences()
+            references.AddReference(human_and_robot_path)
+            
+            simulation_app.update()
+            time.sleep(0.5)
+            
+            print(f"[RACK PLACER] ✓ Successfully referenced human and robot scene under /World")
+        else:
+            raise Exception("World prim not found")
     
 except Exception as e:
     print(f"[RACK PLACER] ✗ Failed to import human and robot scene: {e}")
+    import traceback
+    traceback.print_exc()
 
 # Keep the simulation running (remove these lines if you want it to exit immediately)
 print("[RACK PLACER] Simulation running. Close window to exit.")

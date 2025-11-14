@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 
 class Rack:
     """Represents a single rack with position and dimensions"""
-    def __init__(self, x, y, width_m, depth_m, rotation=0, rack_type="Standard Pallet"):
+    def __init__(self, x, y, width_m, depth_m, rotation=0, rack_type="SmallRack"):
         self.x = x  # Canvas coordinates
         self.y = y
         self.width_m = width_m  # Real-world meters
@@ -57,7 +57,7 @@ class Rack:
         
         return Rack(x_px, y_px, data['width_m'], 
                    data['depth_m'], data.get('rotation', 0),
-                   data.get('type', 'Standard Pallet'))
+                   data.get('type', 'SmallRack'))
 
 
 class WarehouseDesigner:
@@ -102,15 +102,102 @@ class WarehouseDesigner:
         
         # Preset rack dimensions (in meters)
         self.rack_presets = {
-            "Standard Pallet": (1.2, 0.8),
-            "Drive-in": (3.0, 1.5),
-            "Cantilever": (2.0, 1.0),
             "SmallRack": (2.0, 0.96),
             "Custom": (1.0, 1.0)
         }
         
         self.setup_ui()
         self.update_warehouse_size()
+
+    def load_preset_list(self):
+        """Load list of preset template files"""
+        self.preset_files = []
+        presets_dir = "presets"
+        
+        # Check if presets directory exists
+        import os
+        if os.path.exists(presets_dir) and os.path.isdir(presets_dir):
+            # Get all JSON files in presets directory
+            for file in os.listdir(presets_dir):
+                if file.endswith('.json'):
+                    self.preset_files.append(file.replace('.json', ''))
+        
+        # Sort alphabetically
+        self.preset_files.sort()
+
+    def refresh_preset_list(self):
+        """Refresh the preset list"""
+        self.load_preset_list()
+        self.preset_combo['values'] = self.preset_files
+        if self.preset_files:
+            self.preset_combo.current(0)
+        messagebox.showinfo("Success", f"Found {len(self.preset_files)} preset(s)")
+
+    def load_preset_template(self):
+        """Load a preset template"""
+        if not self.preset_files:
+            messagebox.showwarning("Warning", "No presets found in 'presets' folder")
+            return
+        
+        preset_name = self.preset_combo.get()
+        if not preset_name:
+            messagebox.showwarning("Warning", "Please select a preset")
+            return
+        
+        import os
+        filename = os.path.join("presets", preset_name + ".json")
+        
+        if not os.path.exists(filename):
+            messagebox.showerror("Error", f"Preset file not found: {filename}")
+            return
+        
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            
+            # Clear existing
+            self.canvas.delete('all')
+            self.racks.clear()
+            self.waypoints.clear()
+            self.path_lines.clear()
+            self.waypoint_markers.clear()
+            
+            # Load settings (same as load_layout)
+            self.scale = data.get('scale', 50)
+            self.scale_var.set(str(self.scale))
+            
+            self.warehouse_width_m = data.get('warehouse_width_m', 40)
+            self.warehouse_height_m = data.get('warehouse_height_m', 30)
+            self.wh_width_var.set(str(self.warehouse_width_m))
+            self.wh_height_var.set(str(self.warehouse_height_m))
+            
+            warehouse_type = data.get('warehouse_type', 'Custom')
+            self.warehouse_var.set(warehouse_type)
+            
+            origin = data.get('world_origin', {'x': self.warehouse_width_m/2, 
+                                            'y': self.warehouse_height_m/2})
+            self.origin_x_m = origin['x']
+            self.origin_y_m = origin['y']
+            self.origin_x_var.set(str(self.origin_x_m))
+            self.origin_y_var.set(str(self.origin_y_m))
+            
+            # Load racks
+            for rack_data in data['racks']:
+                rack = Rack.from_dict(rack_data, self.origin_x_m, 
+                                    self.origin_y_m, self.scale)
+                self.racks.append(rack)
+            
+            # Load path
+            if 'path' in data and 'waypoints' in data['path']:
+                self.waypoints_from_dict(data['path']['waypoints'])
+            
+            self.update_warehouse_size()
+            messagebox.showinfo("Success", f"Preset '{preset_name}' loaded\n"
+                            f"Racks: {len(self.racks)}\n"
+                            f"Waypoints: {len(self.waypoints)}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load preset: {e}")
         
     def setup_ui(self):
         """Create the GUI layout"""
@@ -129,10 +216,12 @@ class WarehouseDesigner:
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, 
                                                         fill=tk.Y, padx=10)
         
-        ttk.Button(toolbar, text="Save Layout", 
+        ttk.Button(toolbar, text="Save Test Case", 
                   command=self.save_layout).pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar, text="Load Layout", 
+        ttk.Button(toolbar, text="Load Test Case", 
                   command=self.load_layout).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Export Path TXT", 
+                  command=self.export_path_txt).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Export PNG", 
                   command=self.export_png).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Clear All", 
@@ -142,10 +231,36 @@ class WarehouseDesigner:
         main_container = ttk.Frame(self.root)
         main_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Left panel - Tools
-        left_panel = ttk.Frame(main_container, width=250)
-        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        left_panel.pack_propagate(False)
+        # Left panel - Tools with scrollbar
+        left_panel_container = ttk.Frame(main_container, width=250)
+        left_panel_container.pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        left_panel_container.pack_propagate(False)
+
+        # Create canvas for scrolling
+        left_canvas = tk.Canvas(left_panel_container, width=250)
+        left_scrollbar = ttk.Scrollbar(left_panel_container, orient=tk.VERTICAL, command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_scrollbar.set)
+
+        left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Create frame inside canvas
+        left_panel = ttk.Frame(left_canvas)
+        left_canvas_window = left_canvas.create_window((0, 0), window=left_panel, anchor=tk.NW)
+
+        # Update scrollregion when frame changes size
+        def configure_scroll_region(event):
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+            
+        left_panel.bind('<Configure>', configure_scroll_region)
+
+        # Bind mousewheel for scrolling
+        def on_mousewheel(event):
+            left_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            
+        left_canvas.bind_all("<MouseWheel>", on_mousewheel)  # Windows
+        left_canvas.bind_all("<Button-4>", lambda e: left_canvas.yview_scroll(-1, "units"))  # Linux scroll up
+        left_canvas.bind_all("<Button-5>", lambda e: left_canvas.yview_scroll(1, "units"))   # Linux scroll down
         
         # Warehouse size selection
         warehouse_frame = ttk.LabelFrame(left_panel, text="Warehouse Size", padding=10)
@@ -196,6 +311,26 @@ class WarehouseDesigner:
                   command=self.set_origin_center).grid(
                       row=3, column=0, columnspan=2, pady=2)
         
+        # Preset Templates
+        presets_frame = ttk.LabelFrame(left_panel, text="Test Case Presets", padding=10)
+        presets_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(presets_frame, text="Load Template:").pack(anchor=tk.W, pady=2)
+
+        # Scan for preset files
+        self.load_preset_list()
+
+        self.preset_combo = ttk.Combobox(presets_frame, values=self.preset_files, 
+                                        state='readonly', width=20)
+        if self.preset_files:
+            self.preset_combo.current(0)
+        self.preset_combo.pack(fill=tk.X, pady=2)
+
+        ttk.Button(presets_frame, text="Load Preset",
+                command=self.load_preset_template).pack(fill=tk.X, pady=2)
+        ttk.Button(presets_frame, text="Refresh List",
+                command=self.refresh_preset_list).pack(fill=tk.X, pady=2)
+        
         # Mode selection
         mode_frame = ttk.LabelFrame(left_panel, text="Placement Mode", padding=10)
         mode_frame.pack(fill=tk.X, pady=5)
@@ -217,7 +352,7 @@ class WarehouseDesigner:
         preset_frame = ttk.LabelFrame(left_panel, text="Rack Type", padding=10)
         preset_frame.pack(fill=tk.X, pady=5)
         
-        self.preset_var = tk.StringVar(value="Standard Pallet")
+        self.preset_var = tk.StringVar(value="SmallRack")
         for preset in self.rack_presets.keys():
             ttk.Radiobutton(preset_frame, text=preset, value=preset,
                           variable=self.preset_var,
@@ -228,12 +363,12 @@ class WarehouseDesigner:
         dim_frame.pack(fill=tk.X, pady=5)
         
         ttk.Label(dim_frame, text="Width:").grid(row=0, column=0, sticky=tk.W, pady=2)
-        self.width_var = tk.StringVar(value="1.2")
+        self.width_var = tk.StringVar(value="2.0")
         ttk.Entry(dim_frame, textvariable=self.width_var, width=10).grid(
             row=0, column=1, pady=2)
         
         ttk.Label(dim_frame, text="Depth:").grid(row=1, column=0, sticky=tk.W, pady=2)
-        self.depth_var = tk.StringVar(value="0.8")
+        self.depth_var = tk.StringVar(value="0.96")
         ttk.Entry(dim_frame, textvariable=self.depth_var, width=10).grid(
             row=1, column=1, pady=2)
         
@@ -276,6 +411,12 @@ class WarehouseDesigner:
                   command=self.duplicate_selected).pack(fill=tk.X, pady=2)
         ttk.Button(action_frame, text="Clear Path",
                   command=self.clear_path).pack(fill=tk.X, pady=2)
+        ttk.Button(action_frame, text="Load Path TXT",
+                  command=self.load_path_txt).pack(fill=tk.X, pady=2)
+        ttk.Button(action_frame, text="Undo Last Waypoint",
+                  command=self.undo_last_waypoint).pack(fill=tk.X, pady=2)
+        ttk.Button(action_frame, text="Apply Rotation",
+                  command=self.apply_rotation_to_selected).pack(fill=tk.X, pady=2)
         
         # Statistics
         stats_frame = ttk.LabelFrame(left_panel, text="Statistics", padding=10)
@@ -548,6 +689,30 @@ class WarehouseDesigner:
             self.update_stats()
             self.status_bar.config(text="Path cleared")
     
+    def undo_last_waypoint(self):
+        """Remove the last waypoint from the path"""
+        if self.waypoints:
+            self.waypoints.pop()
+            self.redraw_path()
+            self.update_stats()
+            remaining = len(self.waypoints)
+            self.status_bar.config(text=f"Path Mode: {remaining} waypoint{'s' if remaining != 1 else ''}")
+        else:
+            messagebox.showinfo("Info", "No waypoints to undo")
+    
+    def apply_rotation_to_selected(self):
+        """Apply custom rotation value from entry field to selected rack"""
+        if self.selected_rack:
+            try:
+                new_rotation = float(self.rotation_var.get())
+                self.selected_rack.rotation = new_rotation % 360
+                self.draw_rack(self.selected_rack, selected=True)
+                messagebox.showinfo("Success", f"Rotation set to {self.selected_rack.rotation}°")
+            except ValueError:
+                messagebox.showerror("Error", "Invalid rotation value")
+        else:
+            messagebox.showwarning("Warning", "No rack selected")
+    
     def redraw_path(self):
         """Redraw the path with waypoints"""
         # Clear existing path elements
@@ -808,6 +973,82 @@ class WarehouseDesigner:
             
             self.waypoints.append((x_px, y_px))
     
+    def export_path_txt(self):
+        """Export path waypoints to a TXT file"""
+        if not self.waypoints:
+            messagebox.showwarning("Warning", "No waypoints to export!")
+            return
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                waypoints_world = self.waypoints_to_dict()
+                
+                with open(filename, 'w') as f:
+                    f.write("Character Idle 10\n")
+
+                    for idx, wp in enumerate(waypoints_world):
+                        f.write(f"Character GoTo {wp['x']} {wp['y']} 0.0 _\n")
+                
+                messagebox.showinfo("Success", 
+                                  f"Path exported to {filename}\n"
+                                  f"Total waypoints: {len(waypoints_world)}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export path: {e}")
+    
+    def load_path_txt(self):
+        """Load path waypoints from a TXT file"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                waypoints_data = []
+                
+                with open(filename, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        # Skip comments and empty lines
+                        if not line or line.startswith('#'):
+                            continue
+                        
+                        # Parse: waypoint_number, x, y
+                        parts = line.split(',')
+                        if len(parts) >= 3:
+                            try:
+                                x = float(parts[1].strip())
+                                y = float(parts[2].strip())
+                                waypoints_data.append({'x': x, 'y': y})
+                            except ValueError:
+                                continue
+                
+                if not waypoints_data:
+                    messagebox.showwarning("Warning", "No valid waypoints found in file!")
+                    return
+                
+                # Clear existing waypoints
+                self.waypoints.clear()
+                self.path_lines.clear()
+                self.waypoint_markers.clear()
+                
+                # Load new waypoints
+                self.waypoints_from_dict(waypoints_data)
+                self.redraw_path()
+                self.update_stats()
+                
+                messagebox.showinfo("Success", 
+                                  f"Path loaded from {filename}\n"
+                                  f"Total waypoints: {len(waypoints_data)}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load path: {e}")
+    
     def save_layout(self):
         """Save layout to JSON file with world coordinates"""
         filename = filedialog.asksaveasfilename(
@@ -836,21 +1077,45 @@ class WarehouseDesigner:
             with open(filename, 'w') as f:
                 json.dump(data, f, indent=2)
             
-            # Automatically save PNG with same name
+            # Automatically save PNG and TXT with same name
             png_filename = filename.rsplit('.', 1)[0] + '.png'
+            txt_filename = filename.rsplit('.', 1)[0] + '.txt'
+
+            saved_files = [filename]
+            errors = []
+
             try:
                 self.export_png_to_file(png_filename)
-                messagebox.showinfo("Success", 
-                                  f"Layout saved to:\n{filename}\n"
-                                  f"Image saved to:\n{png_filename}\n\n"
-                                  f"Warehouse Type: {self.warehouse_var.get()}\n"
-                                  f"Racks: {len(self.racks)}\n"
-                                  f"Waypoints: {len(self.waypoints)}\n"
-                                  f"Positions are relative to origin at ({self.origin_x_m}, {self.origin_y_m})")
+                saved_files.append(png_filename)
             except Exception as e:
+                errors.append(f"PNG: {e}")
+
+            # Save TXT file if waypoints exist
+            if self.waypoints:
+                try:
+                    waypoints_world = self.waypoints_to_dict()
+                    with open(txt_filename, 'w') as f:
+                        f.write("Character Idle 10\n")
+                        for idx, wp in enumerate(waypoints_world):
+                            f.write(f"Character GoTo {wp['x']} {wp['y']} 0.0 _\n")
+                    saved_files.append(txt_filename)
+                except Exception as e:
+                    errors.append(f"TXT: {e}")
+
+            # Show result message
+            if not errors:
+                files_list = "\n".join(saved_files)
+                messagebox.showinfo("Success", 
+                                f"Files saved:\n{files_list}\n\n"
+                                f"Warehouse Type: {self.warehouse_var.get()}\n"
+                                f"Racks: {len(self.racks)}\n"
+                                f"Waypoints: {len(self.waypoints)}\n"
+                                f"Positions are relative to origin at ({self.origin_x_m}, {self.origin_y_m})")
+            else:
+                error_msg = "\n".join(errors)
                 messagebox.showwarning("Partial Success", 
-                                     f"JSON saved successfully to {filename}\n"
-                                     f"But failed to save PNG: {e}")
+                                    f"JSON saved successfully to {filename}\n"
+                                    f"But encountered errors:\n{error_msg}")
     
     def load_layout(self):
         """Load layout from JSON file"""
